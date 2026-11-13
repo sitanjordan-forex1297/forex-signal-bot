@@ -5,10 +5,8 @@ import requests
 import yfinance as yf
 
 PAIRS = {
-    "EURUSD": {"t": "EURUSD=X", "contract": 100000, "jpy": False, "dec": 5},
-    "GBPUSD": {"t": "GBPUSD=X", "contract": 100000, "jpy": False, "dec": 5},
-    "USDJPY": {"t": "JPY=X", "contract": 100000, "jpy": True, "dec": 3},
     "XAUUSD": {"t": "GC=F", "contract": 100, "jpy": False, "dec": 2},
+    "BTCUSD": {"t": "BTC-USD", "contract": 1, "jpy": False, "dec": 2},
 }
 BALANCE = float(os.getenv("BALANCE") or 1000)
 RISK_PCT = float(os.getenv("RISK_PCT") or 1)
@@ -100,7 +98,7 @@ def lot_size(entry, sl, cfg):
 
 def analyze(name, cfg, h1):
     if len(h1) < 200:
-        return []
+        return [], f"{name}: data kurang"
     cut = h1.index[-1]
     hist = h1.iloc[:-1]
     h4 = to_h4(hist)
@@ -109,10 +107,24 @@ def analyze(name, cfg, h1):
     last = h1.iloc[-1]
     levels = snr_levels(h4, 0.5 * a4)
     d = cfg["dec"]
+    zones = [z for z in snd_zones(h4, hist) if z[2] - z[1] <= 1.5 * a4]
+
+    dem = [z for z in zones if z[0] == "demand" and z[2] <= last.c]
+    sup = [z for z in zones if z[0] == "supply" and z[1] >= last.c]
+    st = f"{name}: harga {last.c:.{d}f}"
+    if dem:
+        z = max(dem, key=lambda z: z[2])
+        st += f"\n  demand terdekat {z[1]:.{d}f} - {z[2]:.{d}f}"
+    else:
+        st += "\n  demand terdekat: tidak ada"
+    if sup:
+        z = min(sup, key=lambda z: z[1])
+        st += f"\n  supply terdekat {z[1]:.{d}f} - {z[2]:.{d}f}"
+    else:
+        st += "\n  supply terdekat: tidak ada"
+
     out = []
-    for kind, lo, hi in snd_zones(h4, hist):
-        if hi - lo > 1.5 * a4:
-            continue
+    for kind, lo, hi in zones:
         if kind == "demand" and last.l <= hi and last.c > hi and last.c > last.o:
             side, entry, sl = "BUY", last.c, lo - 0.3 * a1
             tp = entry + RR * (entry - sl)
@@ -131,9 +143,9 @@ def analyze(name, cfg, h1):
                f"dari target ${want:.2f})\n")
         if real > 1.5 * want:
             msg += "Peringatan: lot minimum 0.01 membuat risiko lebih besar dari target.\n"
-        msg += "Cek berita dan spread dulu. Ini alat bantu, bukan jaminan."
+        msg += "Cek ukuran kontrak broker, berita, dan spread dulu. Ini alat bantu, bukan jaminan."
         out.append(msg)
-    return out
+    return out, st
 
 
 def send(text):
@@ -146,17 +158,23 @@ def send(text):
 
 
 def main():
-    msgs = []
+    manual = os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    daily = pd.Timestamp.now(tz="UTC").hour == 0
+    sigs, stats, errs = [], [], []
     for name, cfg in PAIRS.items():
         try:
-            msgs += analyze(name, cfg, load(cfg["t"]))
+            s, st = analyze(name, cfg, load(cfg["t"]))
+            sigs += s
+            stats.append(st)
         except Exception as e:
-            print(name, "gagal:", type(e).__name__)
-    for m in msgs:
+            errs.append(f"{name} gagal: {type(e).__name__}")
+            print(name, "gagal:", type(e).__name__, str(e)[:150])
+    for m in sigs:
         send(m)
-    if os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch" and not msgs:
-        send("Bot aktif. Belum ada sinyal saat ini.")
-    print("Selesai, sinyal:", len(msgs))
+    if manual or daily:
+        send("Bot aktif.\n" + "\n".join(stats + errs) +
+             f"\nSinyal baru: {len(sigs)}")
+    print("Selesai, sinyal:", len(sigs), "error:", len(errs))
 
 
 if __name__ == "__main__":
