@@ -80,12 +80,12 @@ def structure(df, k):
                 sl = [lo[p], False]
         if sh and not sh[1] and cl[t] > sh[0]:
             kind = "CHOCH" if trend == -1 else "BOS"
-            events.append((t, kind, 1, sh[0]))
+            events.append((t, kind, 1, sh[0], sl[0] if sl else None))
             sh[1] = True
             trend = 1
         elif sl and not sl[1] and cl[t] < sl[0]:
             kind = "CHOCH" if trend == 1 else "BOS"
-            events.append((t, kind, -1, sl[0]))
+            events.append((t, kind, -1, sl[0], sh[0] if sh else None))
             sl[1] = True
             trend = -1
     return trend, events
@@ -154,31 +154,51 @@ def build_pois(h1, m5, a1):
     return out
 
 
-def m5_trigger(m5, d, poi, a5, a1):
-    t_tap = poi["touched"]
-    if t_tap is None:
-        return None
+def recent_event(m5, d, kind=None, back=2):
     _, ev = structure(m5, 2)
     n = len(m5) - 1
-    if not ev or ev[-1][0] != n or ev[-1][2] != d or m5.index[n] < t_tap:
+    if not ev:
         return None
-    seg = m5[m5.index >= t_tap - M5]
+    e = ev[-1]
+    if e[0] < n - back or e[2] != d or (kind and e[1] != kind):
+        return None
+    return e
+
+
+def recent_fvg(m5, d, a5, t_min=None):
     tail = m5.iloc[-12:]
-    fv = []
+    best = None
     for fd, lo, hi, i in find_fvgs(tail, 0.1 * a5):
-        if fd != d or tail.index[i] < t_tap:
+        if fd != d:
+            continue
+        if t_min is not None and tail.index[i] < t_min:
             continue
         after = tail.iloc[i + 1:]
         if d == 1 and (after.c < lo).any():
             continue
         if d == -1 and (after.c > hi).any():
             continue
-        fv.append((lo, hi, tail.index[i]))
+        best = (lo, hi)
+    return best
+
+
+def m5_trigger(m5, d, poi, a5, a1):
+    t_tap = poi["touched"]
+    if t_tap is None:
+        return None
+    e = recent_event(m5, d)
+    if not e:
+        return None
+    t_ev = m5.index[e[0]]
+    if t_ev < t_tap:
+        return None
+    seg = m5[m5.index >= t_tap - M5]
+    fv = recent_fvg(m5, d, a5, max(t_tap, t_ev))
     if not fv:
         return None
-    flo, fhi, ft = fv[-1]
+    flo, fhi = fv
     entry = (flo + fhi) / 2
-    price = m5.c.iloc[n]
+    price = m5.c.iloc[-1]
     if d == 1:
         sl = seg.l.min() - 0.2 * a5
         if not (sl < entry < price):
@@ -193,7 +213,36 @@ def m5_trigger(m5, d, poi, a5, a1):
     if risk <= 0 or risk > 1.5 * a1:
         return None
     return {"entry": entry, "sl": sl, "tp": tp, "fvg": (flo, fhi),
-            "kind": ev[-1][1], "level": ev[-1][3]}
+            "kind": e[1], "level": e[3], "t": t_ev}
+
+
+def m5_continue(m5, d, a5, a1):
+    """Mode lanjutan: BOS searah bias di M5 + FVG, entry limit di retest FVG."""
+    e = recent_event(m5, d, "BOS")
+    if not e or e[4] is None:
+        return None
+    t_ev = m5.index[e[0]]
+    fv = recent_fvg(m5, d, a5, t_ev)
+    if not fv:
+        return None
+    flo, fhi = fv
+    entry = (flo + fhi) / 2
+    price = m5.c.iloc[-1]
+    if d == 1:
+        sl = e[4] - 0.2 * a5
+        if not (sl < entry < price):
+            return None
+        tp = entry + RR * (entry - sl)
+    else:
+        sl = e[4] + 0.2 * a5
+        if not (price < entry < sl):
+            return None
+        tp = entry - RR * (sl - entry)
+    risk = abs(entry - sl)
+    if risk <= 0 or risk > 1.5 * a1:
+        return None
+    return {"entry": entry, "sl": sl, "tp": tp, "fvg": (flo, fhi),
+            "kind": "BOS", "level": e[3], "t": t_ev}
 
 
 def lot_size(entry, sl, cfg):
@@ -251,11 +300,14 @@ def analyze(name, cfg, m5):
     for dist, p in near:
         if p["touched"] is None:
             if dist <= 1.5 * a1:
-                key = f"A|{name}|{p['kind']}|{round(p['lo'], d)}|{round(p['hi'], d)}|{today}"
-                alerts.append((key, (
-                    f"MENDEKATI AREA {p['kind'].upper()} {name}\n"
-                    f"Harga {price:.{d}f}, area {p['lo']:.{d}f} - {p['hi']:.{d}f}\n"
-                    f"Bias H1 {arah(t1)}. Belum ada sinyal entri.")))
+                mid = (p["lo"] + p["hi"]) / 2
+                alerts.append({
+                    "name": name, "kind": p["kind"], "mid": mid,
+                    "tol": 0.5 * a1, "day": today,
+                    "key": f"A|{name}|{p['kind']}|{mid:.2f}|{today}",
+                    "msg": (f"MENDEKATI AREA {p['kind'].upper()} {name}\n"
+                            f"Harga {price:.{d}f}, area {p['lo']:.{d}f} - {p['hi']:.{d}f}\n"
+                            f"Bias H1 {arah(t1)}. Belum ada sinyal entri.")})
             continue
         if t30 != t1:
             continue
@@ -264,7 +316,7 @@ def analyze(name, cfg, m5):
             continue
         side = "BUY LIMIT" if t1 == 1 else "SELL LIMIT"
         lot, real, want = lot_size(tr["entry"], tr["sl"], cfg)
-        key = f"S|{name}|{side}|{m5.index[-1].isoformat()}"
+        key = f"S|{name}|{side}|{tr['t'].isoformat()}"
         msg = (f"SINYAL {side} {name} (SMC)\n"
                f"Bias H1: {arah(t1)} | M30: {arah(t30)}\n"
                f"Area H1: {p['kind']} {p['lo']:.{d}f} - {p['hi']:.{d}f} "
@@ -280,6 +332,27 @@ def analyze(name, cfg, m5):
                 "sebelum terisi. Cek ukuran kontrak broker, berita, dan spread. "
                 "Alat bantu, bukan jaminan.")
         sigs.append((key, msg))
+    if not sigs and t30 == t1:
+        cn = m5_continue(m5, t1, a5, a1)
+        if cn:
+            side = "BUY LIMIT" if t1 == 1 else "SELL LIMIT"
+            lot, real, want = lot_size(cn["entry"], cn["sl"], cfg)
+            hour = cn["t"].floor("1h").isoformat()
+            key = f"C|{name}|{side}|{hour}"
+            msg = (f"SINYAL {side} {name} (lanjutan BOS)\n"
+                   f"Bias H1: {arah(t1)} | M30: {arah(t30)}\n"
+                   f"M5: BOS {arah(t1)}, tutup melewati {cn['level']:.{d}f}\n"
+                   f"Entry limit: {cn['entry']:.{d}f} "
+                   f"(FVG M5 {cn['fvg'][0]:.{d}f} - {cn['fvg'][1]:.{d}f})\n"
+                   f"SL: {cn['sl']:.{d}f} (di balik swing M5 terakhir)\n"
+                   f"TP: {cn['tp']:.{d}f} (RR 1:{RR:g})\n"
+                   f"Lot: {lot:.2f} (risiko sekitar ${real:.2f} dari target ${want:.2f})\n")
+            if real > 1.5 * want:
+                msg += "Peringatan: lot minimum 0.01 membuat risiko lebih besar dari target.\n"
+            msg += ("Mode lanjutan tidak berada di area H1, jadi lebih berisiko. "
+                    "Pertimbangkan lot lebih kecil. Order limit bisa tidak terisi. "
+                    "Alat bantu, bukan jaminan.")
+            sigs.append((key, msg))
     return sigs, alerts, st
 
 
@@ -373,6 +446,18 @@ def load_state():
         return None
 
 
+def alert_sent(sent, al):
+    pre = f"A|{al['name']}|{al['kind']}|"
+    for k in sent:
+        if k.startswith(pre) and k.endswith("|" + al["day"]):
+            try:
+                if abs(float(k.split("|")[3]) - al["mid"]) <= al["tol"]:
+                    return True
+            except ValueError:
+                pass
+    return False
+
+
 def main():
     manual = os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch"
     now = pd.Timestamp.now(tz="UTC")
@@ -406,18 +491,22 @@ def main():
             if blk:
                 n_skip += len(sigs) + len(alerts)
                 continue
-            for key, msg in sigs + alerts:
+            for key, msg in sigs:
                 if key in sent:
                     continue
-                if key.startswith("S|") and nxt:
+                if nxt:
                     msg += "\nBerita terdekat: " + news_text(nxt)
                 if send(msg):
                     sent.append(key)
                     changed = True
-                    if key.startswith("S|"):
-                        n_sig += 1
-                    else:
-                        n_al += 1
+                    n_sig += 1
+            for al in alerts:
+                if alert_sent(sent, al):
+                    continue
+                if send(al["msg"]):
+                    sent.append(al["key"])
+                    changed = True
+                    n_al += 1
         except Exception as e:
             errs.append(f"{name} gagal: {type(e).__name__}")
             print(name, "gagal:", type(e).__name__, str(e)[:150])
