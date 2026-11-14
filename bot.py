@@ -20,6 +20,7 @@ M5 = pd.Timedelta(minutes=5)
 M30 = pd.Timedelta(minutes=30)
 H1 = pd.Timedelta(hours=1)
 TAP_WINDOW = 48  # candle M5 (4 jam)
+MIN_Q = 55  # kualitas area minimal (0-100) untuk peringatan dan sinyal
 CAL_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 NEWS_BEFORE = pd.Timedelta(minutes=30)
 NEWS_AFTER = pd.Timedelta(minutes=30)
@@ -35,7 +36,11 @@ def load(ticker):
                              progress=False, auto_adjust=False)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            df = df[["Open", "High", "Low", "Close"]].dropna()
+            if "Volume" not in df.columns:
+                df["Volume"] = 0.0
+            df = df[["Open", "High", "Low", "Close", "Volume"]]
+            df = df.dropna(subset=["Open", "High", "Low", "Close"])
+            df["Volume"] = df["Volume"].fillna(0)
             if df.empty:
                 raise ValueError("data kosong")
             break
@@ -44,7 +49,7 @@ def load(ticker):
             time.sleep(3)
     else:
         raise err
-    df.columns = ["o", "h", "l", "c"]
+    df.columns = ["o", "h", "l", "c", "v"]
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
     df.index = df.index.tz_convert("UTC")
@@ -53,8 +58,10 @@ def load(ticker):
 
 
 def rs(df, rule):
-    return df.resample(rule).agg(
-        {"o": "first", "h": "max", "l": "min", "c": "last"}).dropna()
+    agg = {"o": "first", "h": "max", "l": "min", "c": "last"}
+    if "v" in df.columns:
+        agg["v"] = "sum"
+    return df.resample(rule).agg(agg).dropna(subset=["o", "h", "l", "c"])
 
 
 def atr(df, n=14):
@@ -122,9 +129,22 @@ def zone_status(m5, lo, hi, dirn, t_start):
     return "ok", t
 
 
-def build_pois(h1, m5, a1):
+def score_poi(body_atr, fvg, bos, fresh, aligned):
+    sc = (min(30, 15 * body_atr) + (20 if fvg else 0) + (15 if bos else 0)
+          + (20 if fresh else 8) + (15 if aligned else 0))
+    return int(min(100, sc))
+
+
+def build_pois(h1, m5, a1, rl, rh):
     out = []
     a = atr(h1)
+
+    def aligned(mid, d):
+        if rh <= rl:
+            return False
+        p = (mid - rl) / (rh - rl)
+        return p <= 0.5 if d == 1 else p >= 0.5
+
     for i in range(max(14, len(h1) - 400), len(h1) - 1):
         base, imp, A = h1.iloc[i], h1.iloc[i + 1], a.iloc[i]
         if np.isnan(A) or abs(base.c - base.o) > 0.5 * A:
@@ -141,17 +161,88 @@ def build_pois(h1, m5, a1):
         if hi - lo > 2 * a1:
             continue
         st, tt = zone_status(m5, lo, hi, d, h1.index[i + 1] + H1)
-        if st == "ok":
-            out.append({"kind": kind, "dir": d, "lo": lo, "hi": hi, "touched": tt})
+        if st != "ok":
+            continue
+        fvg = i + 2 < len(h1) and (
+            (d == 1 and h1.l.iloc[i + 2] > h1.h.iloc[i]) or
+            (d == -1 and h1.h.iloc[i + 2] < h1.l.iloc[i]))
+        prior = h1.iloc[max(0, i - 10):i + 1]
+        bos = imp.c > prior.h.max() if d == 1 else imp.c < prior.l.min()
+        sc = score_poi(abs(body) / A, fvg, bos, tt is None, aligned((lo + hi) / 2, d))
+        out.append({"kind": kind, "dir": d, "lo": lo, "hi": hi,
+                    "touched": tt, "score": sc})
     tail = h1.iloc[-400:]
     for d, lo, hi, i in find_fvgs(tail, 0.2 * a1):
         if hi - lo > 2 * a1:
             continue
         st, tt = zone_status(m5, lo, hi, d, tail.index[i] + H1)
-        if st == "ok":
-            out.append({"kind": "FVG naik" if d == 1 else "FVG turun",
-                        "dir": d, "lo": lo, "hi": hi, "touched": tt})
+        if st != "ok":
+            continue
+        mc = tail.iloc[i - 1]
+        prior = tail.iloc[max(0, i - 11):i - 1]
+        bos = False
+        if len(prior):
+            bos = mc.c > prior.h.max() if d == 1 else mc.c < prior.l.min()
+        sc = score_poi(abs(mc.c - mc.o) / a1, True, bos, tt is None,
+                       aligned((lo + hi) / 2, d))
+        out.append({"kind": "FVG naik" if d == 1 else "FVG turun",
+                    "dir": d, "lo": lo, "hi": hi, "touched": tt, "score": sc})
     return out
+
+
+def eq_levels(df, tol):
+    """Equal highs/lows yang belum tertembus. Return (daftar EQH, daftar EQL)."""
+    hi, lo = df.h.values, df.l.values
+    sh, sl = [], []
+    for p in range(3, len(df) - 3):
+        if hi[p] == hi[p - 3:p + 4].max():
+            sh.append((p, hi[p]))
+        if lo[p] == lo[p - 3:p + 4].min():
+            sl.append((p, lo[p]))
+    eqh, eql = [], []
+    pts = sh[-8:]
+    for x in range(len(pts)):
+        for y in range(x + 1, len(pts)):
+            if abs(pts[x][1] - pts[y][1]) <= tol:
+                lv = max(pts[x][1], pts[y][1])
+                if hi[pts[y][0] + 1:].max(initial=-np.inf) <= lv + tol:
+                    eqh.append(lv)
+    pts = sl[-8:]
+    for x in range(len(pts)):
+        for y in range(x + 1, len(pts)):
+            if abs(pts[x][1] - pts[y][1]) <= tol:
+                lv = min(pts[x][1], pts[y][1])
+                if lo[pts[y][0] + 1:].min(initial=np.inf) >= lv - tol:
+                    eql.append(lv)
+    return eqh, eql
+
+
+def rvol(h1):
+    if "v" not in h1.columns or len(h1) < 30:
+        return None
+    base = h1.v.iloc[-49:-1].median()
+    if not base or base <= 0 or h1.v.iloc[-1] <= 0:
+        return None
+    return h1.v.iloc[-1] / base
+
+
+def rvol_label(rv):
+    if rv is None:
+        return "n/a"
+    if rv < 0.7:
+        return f"SEPI ({rv:.1f}x)"
+    if rv > 1.3:
+        return f"RAMAI ({rv:.1f}x)"
+    return f"NORMAL ({rv:.1f}x)"
+
+
+def killzone(now):
+    h = now.hour + now.minute / 60
+    if 7 <= h < 10:
+        return "London"
+    if 12 <= h < 15:
+        return "New York"
+    return None
 
 
 def recent_event(m5, d, kind=None, back=2):
@@ -261,9 +352,10 @@ def wib(ts):
 
 
 def analyze(name, cfg, m5):
-    """Return (sinyal, peringatan, status). sinyal/peringatan = [(kunci, pesan)]"""
+    """Return (sinyal, peringatan, status). sinyal = [(kunci, pesan)], peringatan = [dict]"""
     if len(m5) < 1500:
         return [], [], f"{name}: data kurang"
+    now = pd.Timestamp.now(tz="UTC")
     end = m5.index[-1] + M5
     h1 = rs(m5, "1h")
     h1 = h1[h1.index + H1 <= end]
@@ -272,17 +364,59 @@ def analyze(name, cfg, m5):
     a1, a5 = atr(h1).iloc[-1], atr(m5).iloc[-1]
     price = m5.c.iloc[-1]
     d = cfg["dec"]
+    fx = lambda x: "-" if x is None else f"{x:.{d}f}"
     t1, ev1 = structure(h1, 3)
     t30, _ = structure(m30, 2)
+    rh, rl = h1.h.iloc[-120:].max(), h1.l.iloc[-120:].min()
+    pct = (price - rl) / (rh - rl) * 100 if rh > rl else 50.0
+    zone = "PREMIUM" if pct > 50 else "DISCOUNT"
+    pd_ok = (t1 == -1 and pct >= 50) or (t1 == 1 and pct <= 50)
+    ideal = "premium" if t1 == -1 else "discount"
+    tol = 0.15 * a1
+    eqh_l, eql_l = eq_levels(h1, tol)
+    eqh = min([x for x in eqh_l if x > price], default=None)
+    eql = max([x for x in eql_l if x < price], default=None)
+    h0, l0 = eq_levels(h1.iloc[:-6], tol)
+    sweep = None
+    for c in m30.iloc[-8:].itertuples():
+        for lv in h0:
+            if c.h > lv and c.c < lv:
+                sweep = f"EQH {lv:.{d}f} tersapu"
+        for lv in l0:
+            if c.l < lv and c.c > lv:
+                sweep = f"EQL {lv:.{d}f} tersapu"
+    allp = build_pois(h1, m5, a1, rl, rh)
+    n_up = sum(1 for p in allp if p["dir"] == 1)
+    n_dn = len(allp) - n_up
+    avg_q = sum(p["score"] for p in allp) / len(allp) if allp else 0
+    kz = killzone(now)
+    ctx = f"Sesi: {kz or 'luar killzone'} | RVOL: {rvol_label(rvol(h1))}\n"
+
     last_ev = f" ({ev1[-1][1]})" if ev1 else ""
-    st = (f"{name}: harga {price:.{d}f}\n"
-          f"  H1 {arah(t1)}{last_ev} | M30 {arah(t30)}")
+    lines = [f"{name}: harga {price:.{d}f}",
+             f"  Bias H1: {arah(t1)}{last_ev} | M30: {arah(t30)}",
+             f"  Zona: {zone} ({pct:.0f}% dari range 5 hari)"]
+    if ev1:
+        t_e, _, dr, _, opp = ev1[-1]
+        seg = h1.iloc[t_e:]
+        if dr == -1:
+            lines.append(f"  Strong high {fx(opp)} | Weak low {fx(seg.l.min())}")
+        else:
+            lines.append(f"  Strong low {fx(opp)} | Weak high {fx(seg.h.max())}")
+    lines.append(f"  EQH {fx(eqh)} | EQL {fx(eql)}")
+    lines.append(f"  Sweep: {sweep or '-'}")
+    lines.append(f"  Area aktif: naik {n_up}, turun {n_dn}, kualitas rata-rata {avg_q:.0f}%")
+    lines.append(f"  RVOL: {rvol_label(rvol(h1))} | Sesi: {kz or 'luar killzone'}")
+
     sigs, alerts = [], []
     if t1 == 0:
-        return sigs, alerts, st + "\n  bias belum jelas"
-    pois = [p for p in build_pois(h1, m5, a1) if p["dir"] == t1]
+        lines.append("  Setup: TUNGGU (bias belum jelas)")
+        return sigs, alerts, "\n".join(lines)
+
     near = []
-    for p in pois:
+    for p in allp:
+        if p["dir"] != t1 or p["score"] < MIN_Q:
+            continue
         if p["touched"] is None:
             dist = price - p["hi"] if t1 == 1 else p["lo"] - price
             if dist <= 0:
@@ -293,10 +427,11 @@ def analyze(name, cfg, m5):
     near.sort(key=lambda x: x[0])
     if near:
         p = near[0][1]
-        st += f"\n  area terdekat: {p['kind']} {p['lo']:.{d}f} - {p['hi']:.{d}f}"
+        lines.append(f"  Area terdekat: {p['kind']} {p['lo']:.{d}f} - {p['hi']:.{d}f} "
+                     f"(kualitas {p['score']}%)")
     else:
-        st += "\n  area terdekat: tidak ada"
-    today = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+        lines.append(f"  Area terdekat: tidak ada (kualitas minimal {MIN_Q}%)")
+    today = now.strftime("%Y-%m-%d")
     for dist, p in near:
         if p["touched"] is None:
             if dist <= 1.5 * a1:
@@ -306,8 +441,10 @@ def analyze(name, cfg, m5):
                     "tol": 0.5 * a1, "day": today,
                     "key": f"A|{name}|{p['kind']}|{mid:.2f}|{today}",
                     "msg": (f"MENDEKATI AREA {p['kind'].upper()} {name}\n"
-                            f"Harga {price:.{d}f}, area {p['lo']:.{d}f} - {p['hi']:.{d}f}\n"
-                            f"Bias H1 {arah(t1)}. Belum ada sinyal entri.")})
+                            f"Harga {price:.{d}f}, area {p['lo']:.{d}f} - {p['hi']:.{d}f} "
+                            f"(kualitas {p['score']}%)\n"
+                            f"Bias H1 {arah(t1)} | Zona {zone} {pct:.0f}%\n"
+                            f"Belum ada sinyal entri.")})
             continue
         if t30 != t1:
             continue
@@ -318,42 +455,59 @@ def analyze(name, cfg, m5):
         lot, real, want = lot_size(tr["entry"], tr["sl"], cfg)
         key = f"S|{name}|{side}|{tr['t'].isoformat()}"
         msg = (f"SINYAL {side} {name} (SMC)\n"
-               f"Bias H1: {arah(t1)} | M30: {arah(t30)}\n"
+               f"Bias H1: {arah(t1)} | M30: {arah(t30)} | Zona: {zone} {pct:.0f}%\n"
                f"Area H1: {p['kind']} {p['lo']:.{d}f} - {p['hi']:.{d}f} "
-               f"(tersentuh {wib(p['touched'])} WIB)\n"
+               f"(kualitas {p['score']}%, tersentuh {wib(p['touched'])} WIB)\n"
                f"M5: {tr['kind']} {arah(t1)}, tutup melewati {tr['level']:.{d}f}\n"
                f"Entry limit: {tr['entry']:.{d}f} "
                f"(FVG M5 {tr['fvg'][0]:.{d}f} - {tr['fvg'][1]:.{d}f})\n"
                f"SL: {tr['sl']:.{d}f}\nTP: {tr['tp']:.{d}f} (RR 1:{RR:g})\n"
-               f"Lot: {lot:.2f} (risiko sekitar ${real:.2f} dari target ${want:.2f})\n")
+               f"Lot: {lot:.2f} (risiko sekitar ${real:.2f} dari target ${want:.2f})\n"
+               + ctx)
         if real > 1.5 * want:
             msg += "Peringatan: lot minimum 0.01 membuat risiko lebih besar dari target.\n"
         msg += ("Order limit bisa tidak terisi. Batalkan kalau harga sudah menembus SL "
                 "sebelum terisi. Cek ukuran kontrak broker, berita, dan spread. "
                 "Alat bantu, bukan jaminan.")
         sigs.append((key, msg))
+    blocked = False
     if not sigs and t30 == t1:
         cn = m5_continue(m5, t1, a5, a1)
-        if cn:
+        if cn and not pd_ok:
+            blocked = True
+        elif cn:
             side = "BUY LIMIT" if t1 == 1 else "SELL LIMIT"
             lot, real, want = lot_size(cn["entry"], cn["sl"], cfg)
             hour = cn["t"].floor("1h").isoformat()
             key = f"C|{name}|{side}|{hour}"
             msg = (f"SINYAL {side} {name} (lanjutan BOS)\n"
-                   f"Bias H1: {arah(t1)} | M30: {arah(t30)}\n"
+                   f"Bias H1: {arah(t1)} | M30: {arah(t30)} | Zona: {zone} {pct:.0f}%\n"
                    f"M5: BOS {arah(t1)}, tutup melewati {cn['level']:.{d}f}\n"
                    f"Entry limit: {cn['entry']:.{d}f} "
                    f"(FVG M5 {cn['fvg'][0]:.{d}f} - {cn['fvg'][1]:.{d}f})\n"
                    f"SL: {cn['sl']:.{d}f} (di balik swing M5 terakhir)\n"
                    f"TP: {cn['tp']:.{d}f} (RR 1:{RR:g})\n"
-                   f"Lot: {lot:.2f} (risiko sekitar ${real:.2f} dari target ${want:.2f})\n")
+                   f"Lot: {lot:.2f} (risiko sekitar ${real:.2f} dari target ${want:.2f})\n"
+                   + ctx)
             if real > 1.5 * want:
                 msg += "Peringatan: lot minimum 0.01 membuat risiko lebih besar dari target.\n"
             msg += ("Mode lanjutan tidak berada di area H1, jadi lebih berisiko. "
                     "Pertimbangkan lot lebih kecil. Order limit bisa tidak terisi. "
                     "Alat bantu, bukan jaminan.")
             sigs.append((key, msg))
-    return sigs, alerts, st
+    if sigs:
+        setup = "SINYAL"
+    elif alerts:
+        setup = "MENDEKATI AREA"
+    elif blocked:
+        setup = (f"TUNGGU (ada BOS M5 searah bias, tapi harga di zona {zone.lower()}; "
+                 f"tunggu pullback ke {ideal})")
+    elif not pd_ok:
+        setup = f"TUNGGU (harga di {zone.lower()}, idealnya pullback ke {ideal} dulu)"
+    else:
+        setup = "TUNGGU"
+    lines.append(f"  Setup: {setup}")
+    return sigs, alerts, "\n".join(lines)
 
 
 def fetch_calendar():
@@ -522,7 +676,7 @@ def main():
             lines.append("Tidak ada berita besar USD dalam 3 jam ke depan")
         if cal_note:
             lines.append(cal_note)
-        if send("Bot aktif (H1, M30, M5 + filter berita).\n" + "\n".join(lines)) and not manual:
+        if send("Bot aktif (analisis detail SMC + filter berita).\n" + "\n".join(lines)) and not manual:
             sent.append(dkey)
             changed = True
     if changed:
