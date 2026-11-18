@@ -41,7 +41,7 @@ ul{margin:6px 0 0;padding-left:18px}li{margin-bottom:4px}
 <main id="m"><div class="card mu">Memuat data...</div></main>
 <script>
 var URL="https://raw.githubusercontent.com/sitanjordan-forex1297/forex-signal-bot/main/data.json";
-var D=null,tab="a",pair=null,style="Daytrade",shown=false,busy=false,bal=null,rk=null;
+var nf="Semua",D=null,tab="a",pair=null,style="Daytrade",shown=false,busy=false,bal=null,rk=null;
 var HZ={Scalp:"Cepat, RR 1:1.5 dan 1:3",Daytrade:"Harian, RR 1:2 dan 1:4",Swing:"Tren, RR 1:3 dan 1:5"};
 function $(i){return document.getElementById(i)}
 function f(v,d){return v==null?"-":Number(v).toFixed(d)}
@@ -90,9 +90,9 @@ function planCard(p,pl){
 }
 function viewA(){
   var p=D.pairs[pair],pl=p.plans[style],lv=p.levels,d=p.dec,b=p.bias;
-  var h=pairChips()+'<div class="card"><div class="row" style="justify-content:space-between"><span class="mu">'+pair+'</span><span class="pill '+cls(p.zone.name==="PREMIUM"?"turun":"naik")+'">'+p.zone.name+' '+f(p.zone.pct,0)+'%</span></div><div class="big num">'+f(p.price,d)+'</div>'+
+  var h=pairChips()+teaser()+'<div class="card"><div class="row" style="justify-content:space-between"><span class="mu">'+pair+'</span><span class="pill '+cls(p.zone.name==="PREMIUM"?"turun":"naik")+'">'+p.zone.name+' '+f(p.zone.pct,0)+'%</span></div><div class="big num">'+f(p.price,d)+'</div>'+
   '<div class="row mu" style="margin:6px 0"><span>H1 <b class="'+cls(b.h1)+'">'+b.h1+(b.h1_event?' ('+b.h1_event+')':'')+'</b></span><span>M30 <b class="'+cls(b.m30)+'">'+b.m30+'</b></span><span>H4 <b class="'+cls(b.h4)+'">'+b.h4+'</b></span></div>'+chart(p,shown?pl:null)+
-  '<div class="mu">'+(lv.sw?lv.sw[0]+' '+f(lv.sw[1],d)+' | '+lv.sw[2]+' '+f(lv.sw[3],d)+'. ':'')+'EQH '+f(lv.eqh,d)+' | EQL '+f(lv.eql,d)+'. RVOL '+esc(p.rvol)+(p.session?' | sesi '+p.session:'')+'</div></div>'+
+  '<div class="mu">'+(lv.sw?lv.sw[0]+' '+f(lv.sw[1],d)+' | '+lv.sw[2]+' '+f(lv.sw[3],d)+'. ':'')+'EQH '+f(lv.eqh,d)+' | EQL '+f(lv.eql,d)+'. RVOL '+esc(p.rvol)+(p.session?' | sesi '+p.session:'')+'</div><div class="mu" style="margin-top:6px">Harga dari data bot, tertunda beberapa menit dan bisa beda dari harga broker.</div></div>'+
   '<div class="card"><h3>Gaya trading</h3><div class="row">'+["Scalp","Daytrade","Swing"].map(function(s){return '<button class="chip'+(s===style?' on':'')+'" data-s="'+s+'">'+s+'</button>'}).join("")+'</div><div class="mu" style="margin:8px 0 12px">'+HZ[style]+'</div>'+
   '<button class="go" id="go"'+(busy?' disabled':'')+'>'+(busy?'Menganalisis pasar...':'Buat rencana trading')+'</button></div>';
   if(shown&&!busy)h+=planCard(p,pl);
@@ -109,13 +109,41 @@ function viewT(){
   h+='<div class="card"><h3>Pivot points (candle Per Jam sebelumnya)</h3><div class="sc"><table class="pv"><tr><th></th>'+ks.map(function(k){return '<th>'+lb[k]+'</th>'}).join("")+'</tr>'+rw.map(function(r,i){return '<tr><td>'+r+'</td>'+ks.map(function(k){return '<td class="num">'+f(pv(j.piv[k],i),d)+'</td>'}).join("")+'</tr>'}).join("")+'</table></div></div>';
   return h;
 }
+var KB=[
+[/non-farm|nfp|employment change/i,"Data penambahan tenaga kerja sektor non-pertanian AS, salah satu rilis yang paling diperhatikan pasar.","Data jauh di atas perkiraan cenderung menguatkan USD dan menekan emas; data lemah cenderung sebaliknya. Bitcoin dan pair USD ikut bergerak tajam. Arahnya tidak bisa dipastikan."],
+[/unemployment rate/i,"Tingkat pengangguran AS, pelengkap data tenaga kerja.","Angka lebih rendah dari perkiraan cenderung menguatkan USD; lebih tinggi cenderung melemahkannya."],
+[/\bcpi\b/i,"Inflasi harga konsumen AS, patokan utama arah suku bunga The Fed.","Inflasi di atas perkiraan memperkuat ekspektasi suku bunga tinggi: USD cenderung naik, emas dan kripto tertekan. Di bawah perkiraan cenderung sebaliknya."],
+[/\bppi\b/i,"Inflasi harga produsen AS, sering menjadi petunjuk awal inflasi konsumen.","Dampaknya mirip CPI tetapi biasanya lebih ringan."],
+[/fomc|federal funds|fed funds|interest rate/i,"Keputusan atau pernyataan suku bunga The Fed.","Pasar sangat sensitif pada nada ketat (hawkish) atau longgar (dovish). Volatilitas tinggi dan spread melebar."],
+[/speaks|chair|powell/i,"Pidato pejabat The Fed.","Kalimat soal suku bunga bisa menggerakkan USD dan emas mendadak."],
+[/gdp/i,"Pertumbuhan ekonomi AS.","Angka kuat cenderung menguatkan USD; lemah cenderung melemahkannya."],
+[/retail sales/i,"Penjualan ritel AS, cerminan belanja konsumen.","Angka kuat cenderung menguatkan USD dan menekan emas."],
+[/pmi|ism/i,"Survei aktivitas bisnis AS.","Angka di atas 50 menandakan ekspansi; kejutan besar bisa menggerakkan USD."],
+[/jobless claims|unemployment claims/i,"Klaim tunjangan pengangguran mingguan AS.","Biasanya berdampak ringan kecuali angkanya jauh berbeda dari perkiraan."]];
+var GOLD=/cpi|ppi|non-farm|employment|unemployment|fomc|fed|interest|powell|gdp|pce|retail/i;
+function kb(t){for(var i=0;i<KB.length;i++)if(KB[i][0].test(t))return KB[i];return [0,"Rilis data ekonomi AS.","Rilis ini bisa menggerakkan USD dan aset yang berkaitan. Arahnya tidak bisa dipastikan."]}
+function newsList(){var n=Date.now();return (D.news||[]).filter(function(e){return new Date(e.t).getTime()>n-6*3600000}).slice(0,14)}
+function teaser(){
+  var n=Date.now(),e=(D.news||[]).filter(function(x){return new Date(x.t).getTime()>n-1800000})[0];
+  if(!e)return '';
+  var m=Math.round((new Date(e.t)-n)/60000);
+  return '<button class="card go" data-t="n" style="text-align:left;background:var(--sf);color:var(--tx);border:1px solid var(--bd);font-weight:500;margin-bottom:12px">News Info: '+esc(e.title)+', '+wib(e.t)+(m>0?' (dalam '+(m>60?Math.round(m/60)+' jam':m+' menit')+')':' (sedang berlangsung)')+'</button>';
+}
 function viewN(){
-  var h='';if(D.block)h+='<div class="card warn"><b>Jeda sinyal sedang aktif</b><div class="mu">Dekat rilis: '+esc(D.block)+'. Bot menahan sinyal 30 menit sebelum sampai 30 menit sesudah rilis.</div></div>';
-  h+='<div class="card"><h3>Berita besar USD</h3>';
-  if(!D.news.length)h+='<span class="mu">Tidak ada berita besar yang tercatat pekan ini.</span>';
-  D.news.forEach(function(e){var m=Math.round((new Date(e.t)-Date.now())/60000),st=m>60?'dalam '+Math.round(m/60)+' jam':m>0?'dalam '+m+' menit':m>-30?'sedang berlangsung':'sudah rilis';
-    h+='<div style="padding:10px 0;border-bottom:1px solid var(--bd)"><div class="row" style="justify-content:space-between"><b>'+esc(e.title)+'</b><span class="pill '+(m>-30&&m<60?'warn':'neu')+'">'+st+'</span></div><div class="mu">'+wib(e.t)+(e.forecast?' | perkiraan '+esc(e.forecast):'')+(e.previous?' | sebelumnya '+esc(e.previous):'')+'</div></div>'});
-  return h+'</div><div class="card"><h3>Tips eksekusi</h3><ul><li>Jangan buka posisi 15 menit sebelum dan sesudah rilis. Spread bisa melebar dan terjadi slippage.</li><li>Rilis USD berdampak tinggi menggerakkan XAUUSD, BTCUSD, dan hampir semua pair USD.</li><li>Arah harga setelah rilis tidak bisa diprediksi. Tunggu struktur terbentuk.</li></ul></div>';
+  var all=newsList(),hi=all.filter(function(e){return (e.impact||"High")==="High"}),gd=all.filter(function(e){return GOLD.test(e.title)});
+  var list=nf==="High Impact"?hi:nf==="Emas"?gd:all,h='';
+  if(D.block)h+='<div class="card warn"><b>Jeda sinyal sedang aktif</b><div class="mu">Dekat rilis: '+esc(D.block)+'. Bot menahan sinyal 30 menit sebelum sampai 30 menit sesudah rilis.</div></div>';
+  h+='<div class="row" style="margin-bottom:12px">'+[["Semua",all.length],["High Impact",hi.length],["Emas",gd.length]].map(function(c){return '<button class="chip'+(c[0]===nf?' on':'')+'" data-f="'+c[0]+'">'+c[0]+' ('+c[1]+')</button>'}).join("")+'</div>';
+  if(!list.length)h+='<div class="card mu">Tidak ada berita USD yang tercatat untuk filter ini. Kalender gratis hanya memuat pekan berjalan. Kalau kosong terus, kemungkinan sumber kalender sedang tidak bisa diakses dan bot mencoba lagi otomatis.</div>';
+  list.forEach(function(e){
+    var m=Math.round((new Date(e.t)-Date.now())/60000),st=m>60?'dalam '+Math.round(m/60)+' jam':m>0?'dalam '+m+' menit':m>-30?'SEDANG BERLANGSUNG':'sudah rilis',k=kb(e.title),high=(e.impact||"High")==="High";
+    h+='<div class="card"><div class="row"><span class="pill">'+wib(e.t)+'</span><span class="pill '+(m>-30&&m<60?'warn':'neu')+'">'+st+'</span><span class="pill '+(high?'sell':'warn')+'">'+(high?'HIGH IMPACT':'MEDIUM')+'</span></div>'+
+    '<h3 style="margin-top:10px">'+esc(e.title)+' (USD)</h3><div class="mu">'+k[1]+'</div>'+
+    '<div class="mu" style="margin-top:10px">Aset terdampak</div><div class="row" style="margin:4px 0 10px"><span class="pill warn">XAUUSD</span><span class="pill" style="color:var(--ac)">BTCUSD</span><span class="pill neu">EURUSD</span><span class="pill neu">GBPUSD</span><span class="pill neu">USDJPY</span><span class="pill neu">USDCAD</span></div>'+
+    '<div class="mu">Dampak pergerakan pasar</div><div style="margin:2px 0 10px">'+k[2]+'</div>'+
+    '<div class="mu">Tips eksekusi</div><div style="margin:2px 0 10px">Waspada spread: jangan buka posisi 15 menit sebelum dan sesudah rilis ('+wib(e.t)+'). Spread broker bisa melebar dan terjadi slippage.'+(high?' Bot juga menahan sinyal 30 menit sebelum sampai 30 menit sesudah rilis.':'')+'</div>'+
+    '<div class="row mu"><span>Perkiraan: <b class="num">'+esc(e.forecast||"-")+'</b></span><span>Sebelumnya: <b class="num">'+esc(e.previous||"-")+'</b></span></div></div>'});
+  return h+'<div class="mu">Sumber: kalender ekonomi gratis (Forex Factory), pembaruan sekitar tiap 6 jam. Arah harga setelah rilis tidak bisa diprediksi.</div>';
 }
 function viewR(){
   var s=D.history.stats,h='<div class="card"><h3>Hasil sinyal bot</h3><div class="lv"><div><span class="mu">Win rate</span><b>'+(s.win==null?'-':s.win.toFixed(0)+'%')+'</b></div><div><span class="mu">Total R</span><b class="'+(s.tot>=0?'buy':'sell')+'">'+(s.tot>=0?'+':'')+s.tot.toFixed(1)+'R</b></div><div><span class="mu">TP / SL</span><b>'+s.tp+' / '+s.sl+'</b></div><div><span class="mu">Menunggu / berjalan</span><b>'+s.wait+' / '+s.run+'</b></div></div>';
@@ -135,6 +163,7 @@ document.addEventListener("click",function(e){
   if(t.dataset.t){tab=t.dataset.t;render()}
   else if(t.dataset.p){pair=t.dataset.p;shown=false;render()}
   else if(t.dataset.s){style=t.dataset.s;shown=false;render()}
+  else if(t.dataset.f){nf=t.dataset.f;render()}
   else if(t.id==="go"&&!busy){busy=true;render();setTimeout(function(){busy=false;shown=true;render()},700)}
 });
 document.addEventListener("input",function(e){
@@ -143,7 +172,7 @@ document.addEventListener("input",function(e){
     $("lt").textContent="Lot "+L.lot.toFixed(2)+" | risiko sekitar $"+L.real.toFixed(2)+" dari target $"+L.want.toFixed(2);
   }
 });
-load();setInterval(load,300000);
+load();setInterval(load,120000);
 </script>
 </body>
 </html>
