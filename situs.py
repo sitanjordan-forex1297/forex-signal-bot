@@ -216,12 +216,93 @@ def pair_block(name, cfg, m5, news_txt):
             "plans": {s: make_plan(name, cfg, m5, s, ctx) for s in STYLES}}
 
 
+def site_news(now, old):
+    """Berita USD berdampak sedang dan tinggi untuk tab Berita. Dicache 6 jam di data.json."""
+    at = (old or {}).get("news_at")
+    ev = (old or {}).get("news")
+    try:
+        if at and ev is not None and now - pd.Timestamp(at) < pd.Timedelta(hours=6):
+            return ev, at
+    except Exception:
+        pass
+    try:
+        r = bot.requests.get(bot.CAL_URL, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        out = []
+        for e in r.json():
+            cur = e.get("country") or e.get("currency")
+            if cur != "USD" or e.get("impact") not in ("High", "Medium"):
+                continue
+            t = pd.Timestamp(e["date"])
+            if t.tzinfo is None:
+                t = t.tz_localize("UTC")
+            out.append({"t": t.tz_convert("UTC").isoformat(), "title": str(e.get("title", "")),
+                        "impact": e.get("impact"), "forecast": str(e.get("forecast", "")),
+                        "previous": str(e.get("previous", ""))})
+        out.sort(key=lambda x: x["t"])
+        return out, now.isoformat()
+    except Exception as ex:
+        print("berita gagal:", type(ex).__name__)
+        return (ev or []), (at or (now - pd.Timedelta(hours=5, minutes=30)).isoformat())
+
+
+def notify_plans(pairs, blk, now):
+    """Kirim peringatan Telegram saat rencana gaya Scalp/Daytrade/Swing berstatus SIAP atau MENDEKATI."""
+    if blk:
+        return 0
+    state = bot.load_state() or {}
+    sent = list(state.get("sent", []))
+    day = now.strftime("%Y-%m-%d")
+    n = 0
+    for name, p in pairs.items():
+        cfg = bot.PAIRS[name]
+        d = cfg["dec"]
+        for style, pl in p["plans"].items():
+            if pl.get("status") not in ("SIAP", "MENDEKATI") or not pl.get("entry"):
+                continue
+            mid = (pl["area"]["lo"] + pl["area"]["hi"]) / 2
+            tol = 0.5 * abs(pl["entry"] - pl["sl"])
+            pre = f"P|{name}|{style}|"
+            dup = False
+            for k in sent:
+                if k.startswith(pre) and k.endswith("|" + day) and k.count("|") == 4:
+                    try:
+                        dup = dup or abs(float(k.split("|")[3]) - mid) <= tol
+                    except ValueError:
+                        pass
+            if dup:
+                continue
+            lot, real, want = bot.lot_size(pl["entry"], pl["sl"], cfg)
+            msg = (f"RENCANA {style.upper()} {name} ({pl['status']})\n"
+                   f"{pl['side']} entry {pl['entry']:.{d}f} | SL {pl['sl']:.{d}f}\n"
+                   f"TP1 {pl['tp1']:.{d}f} (1:{pl['rr1']:g}) | TP2 {pl['tp2']:.{d}f} (1:{pl['rr2']:g})\n"
+                   f"Area {pl['area']['kind']} {pl['area']['lo']:.{d}f} - {pl['area']['hi']:.{d}f}, "
+                   f"kualitas {pl['quality']}%\n"
+                   f"Lot {lot:.2f} (risiko sekitar ${real:.2f} dari target ${want:.2f})\n"
+                   + "\n".join("- " + a for a in pl["alasan"][:3]) + "\n"
+                   + ("".join("Peringatan: " + w + "\n" for w in pl["peringatan"]))
+                   + "Ini rencana dari area, belum sinyal entri terkonfirmasi. Detail ada di website.")
+            if bot.send(msg):
+                sent.append(f"{pre}{mid:.2f}|{day}")
+                n += 1
+    if n:
+        state["sent"] = sent[-300:]
+        with open(bot.STATE_FILE, "w") as f:
+            json.dump(state, f)
+    return n
+
+
 def export(manual):
     now = pd.Timestamp.now(tz="UTC")
-    if not manual and os.path.exists(OUT):
+    prev = None
+    if os.path.exists(OUT):
         try:
-            old = pd.Timestamp(json.load(open(OUT))["updated"])
-            if now - old < pd.Timedelta(minutes=14):
+            prev = json.load(open(OUT))
+        except Exception:
+            prev = None
+    if not manual and prev:
+        try:
+            if now - pd.Timestamp(prev["updated"]) < pd.Timedelta(minutes=4):
                 return False
         except Exception:
             pass
@@ -241,12 +322,16 @@ def export(manual):
             print("situs gagal:", name, type(e).__name__, str(e)[:120])
     hist = state.get("hist", [])
     items = sorted(hist, key=lambda s: s["t0"], reverse=True)[:40]
-    news = [e for e in events if pd.Timestamp(e["t"]) > now - pd.Timedelta(hours=3)]
+    news, news_at = site_news(now, prev)
     data = {"updated": now.isoformat(), "balance": bot.BALANCE, "risk_pct": bot.RISK_PCT,
-            "pairs": pairs, "news": news, "block": blk["title"] if blk else None,
+            "pairs": pairs, "news": news, "news_at": news_at, "block": blk["title"] if blk else None,
             "history": {"stats": riwayat.stats(hist), "items": items}}
     with open(OUT, "w") as f:
         json.dump(clean(data), f, separators=(",", ":"))
+    try:
+        notify_plans(pairs, blk, now)
+    except Exception as e:
+        print("peringatan rencana gagal:", type(e).__name__, str(e)[:120])
     return True
 
 
