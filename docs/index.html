@@ -41,7 +41,7 @@ ul{margin:6px 0 0;padding-left:18px}li{margin-bottom:4px}
 <main id="m"><div class="card mu">Memuat data...</div></main>
 <script>
 var URL="https://raw.githubusercontent.com/sitanjordan-forex1297/forex-signal-bot/main/data.json";
-var nf="Semua",D=null,tab="a",pair=null,style="Daytrade",shown=false,busy=false,bal=null,rk=null;
+var nf="Semua",mode="fx",balM={},D=null,tab="a",pair=null,style="Daytrade",shown=false,busy=false,bal=null,rk=null;
 var HZ={Scalp:"Cepat, RR 1:1.5 dan 1:3",Daytrade:"Harian, RR 1:2 dan 1:4",Swing:"Tren, RR 1:3 dan 1:5"};
 function $(i){return document.getElementById(i)}
 function f(v,d){return v==null?"-":Number(v).toFixed(d)}
@@ -51,7 +51,7 @@ function ago(iso){var m=Math.round((Date.now()-new Date(iso))/60000);return m<1?
 function wib(iso){return new Date(iso).toLocaleString("id-ID",{timeZone:"Asia/Jakarta",weekday:"short",day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})+" WIB"}
 function load(){
   fetch(URL+"?t="+Date.now()).then(function(r){return r.json()}).then(function(j){
-    D=j;if(!pair||!D.pairs[pair])pair=Object.keys(j.pairs)[0];
+    D=j;fixPair();
     if(bal==null){bal=j.balance;rk=j.risk_pct}
     $("upd").textContent="data "+ago(j.updated);render();
   }).catch(function(){$("m").innerHTML='<div class="card err">Data belum bisa dimuat. Pastikan bot sudah berjalan dan berkas data.json sudah ada di repository.</div>'});
@@ -68,31 +68,46 @@ function chart(p,pl){
     s+='<line x1="0" x2="'+W+'" y1="'+y(l[1])+'" y2="'+y(l[1])+'" stroke="'+l[2]+'" stroke-dasharray="4 3"/><text x="3" y="'+(y(l[1])-3)+'" fill="'+l[2]+'" font-size="9">'+l[0]+'</text>'})}
   return s+'</svg>';
 }
-function pairChips(){return '<div class="row" style="margin-bottom:12px">'+Object.keys(D.pairs).map(function(k){return '<button class="chip'+(k===pair?' on':'')+'" data-p="'+k+'">'+k+'</button>'}).join("")+'</div>'}
-function lot(pl){
-  var risk=(parseFloat(bal)||0)*(parseFloat(rk)||0)/100,l=pl.loss_per_lot?Math.max(Math.floor(risk/pl.loss_per_lot*100)/100,0.01):0;
-  return {lot:l,real:l*pl.loss_per_lot,want:risk};
+function PS(){return mode==="saham"?(D.stocks||{}):D.pairs}
+function fixPair(){var k=Object.keys(PS());if(!PS()[pair])pair=k[0]||null}
+function bl(p){return balM[p.ccy]!=null?balM[p.ccy]:(p.ccy==="IDR"?10000000:D.balance)}
+function modeChips(){return '<div class="row" style="margin-bottom:10px">'+[["fx","Forex dan Kripto"],["saham","Saham"]].map(function(m){return '<button class="chip'+(m[0]===mode?' on':'')+'" data-m="'+m[0]+'">'+m[1]+'</button>'}).join("")+'</div>'}
+function pairChips(){return modeChips()+'<div class="row" style="margin-bottom:12px">'+Object.keys(PS()).map(function(k){return '<button class="chip'+(k===pair?' on':'')+'" data-p="'+k+'">'+k+'</button>'}).join("")+'</div>'}
+function lot(pl,p){
+  var risk=(parseFloat(bl(p))||0)*(parseFloat(rk)||0)/100,st=p.kind==="saham",q=pl.loss_per_lot?risk/pl.loss_per_lot:0;
+  var l=st?Math.floor(q):Math.max(Math.floor(q*100)/100,0.01);
+  return {lot:l,real:l*pl.loss_per_lot,want:risk,st:st};
+}
+function lotText(L,p){
+  var cs=p.ccy==="IDR"?"Rp ":"$",n=function(v){return Number(v).toLocaleString("id-ID",{maximumFractionDigits:2})};
+  if(L.st&&L.lot<1)return "Modal atau risiko terlalu kecil untuk 1 lot (risiko target "+cs+n(L.want)+").";
+  return "Lot "+(L.st?L.lot+(p.contract>1?" ("+n(L.lot*p.contract)+" lembar)":" lembar"):L.lot.toFixed(2))+" | risiko sekitar "+cs+n(L.real)+" dari target "+cs+n(L.want);
+}
+function copyPlan(b){
+  var p=PS()[pair],pl=p.plans[style],d=p.dec,L=lot(pl,p),t=pl.side+" "+pair+"\nEntry "+f(pl.entry,d)+"\nSL "+f(pl.sl,d)+"\nTP1 "+f(pl.tp1,d)+"\nTP2 "+f(pl.tp2,d)+"\nLot "+(L.st?(L.lot<1?"modal terlalu kecil":L.lot):L.lot.toFixed(2));
+  try{navigator.clipboard.writeText(t).then(function(){b.textContent="Tersalin"},function(){b.textContent="Salin manual dari angka di atas"})}catch(x){b.textContent="Salin manual dari angka di atas"}
 }
 function planCard(p,pl){
   var d=p.dec;
   if(!pl.entry)return '<div class="card"><h3>Belum ada rencana</h3><ul>'+(pl.alasan||[]).map(function(a){return '<li>'+esc(a)+'</li>'}).join("")+'</ul></div>';
-  var L=lot(pl),side=pl.dir===1?"buy":"sell",stc=pl.status==="SIAP"?"buy":pl.status==="MENDEKATI"?"warn":"neu";
+  var L=lot(pl,p),pw=pl.peringatan.slice(),side=pl.dir===1?"buy":"sell",stc=pl.status==="SIAP"?"buy":pl.status==="MENDEKATI"?"warn":"neu";if(p.kind==="saham"&&pl.dir===-1)pw.push("Saham: sell hanya relevan jika kamu memegang saham itu; short selling tidak tersedia di banyak akun ritel");
   return '<div class="card"><div class="row" style="justify-content:space-between"><h3 class="'+side+'">'+pair+" "+(pl.dir===1?"LONG":"SHORT")+'</h3><span class="pill '+stc+'">'+esc(pl.status)+'</span></div>'+
   '<div class="mu">Kualitas area '+pl.quality+'% ('+pl.qlabel+'). Ini skor buatan bot, bukan peluang menang.</div>'+
   '<div class="lv" style="margin:12px 0"><div><span class="mu">Tipe dan entry</span><b class="num">'+esc(pl.side)+'<br>'+f(pl.entry,d)+'</b></div><div><span class="mu">Stop loss</span><b class="num sell">'+f(pl.sl,d)+'</b></div>'+
   '<div><span class="mu">TP1 (1:'+pl.rr1+')</span><b class="num buy">'+f(pl.tp1,d)+'</b></div><div><span class="mu">TP2 (1:'+pl.rr2+')</span><b class="num buy">'+f(pl.tp2,d)+'</b></div></div>'+
   '<div class="mu">Area: '+esc(pl.area.kind)+' '+f(pl.area.lo,d)+' - '+f(pl.area.hi,d)+'. Jarak harga ke area: '+f(pl.dist_atr,1)+' ATR. Perkiraan durasi: '+esc(pl.horizon)+'.</div>'+
-  '<h3 style="margin-top:14px">Hitung lot</h3><div class="row"><div style="flex:1"><label class="mu" for="bl">Modal (USD)</label><input id="bl" inputmode="decimal" value="'+esc(bal)+'"></div><div style="flex:1"><label class="mu" for="rk">Risiko (%)</label><input id="rk" inputmode="decimal" value="'+esc(rk)+'"></div></div>'+
-  '<div id="lt" class="num" style="margin-top:8px">Lot '+L.lot.toFixed(2)+' | risiko sekitar $'+L.real.toFixed(2)+' dari target $'+L.want.toFixed(2)+'</div>'+
+  '<h3 style="margin-top:14px">Hitung lot</h3><div class="row"><div style="flex:1"><label class="mu" for="bl">Modal ('+p.ccy+')</label><input id="bl" inputmode="decimal" value="'+esc(bl(p))+'"></div><div style="flex:1"><label class="mu" for="rk">Risiko (%)</label><input id="rk" inputmode="decimal" value="'+esc(rk)+'"></div></div>'+
+  '<div id="lt" class="num" style="margin-top:8px">'+lotText(L,p)+'</div><button class="chip" id="cp" style="margin-top:10px">Salin detail order</button>'+
   '<h3 style="margin-top:14px">Alasan</h3><ul>'+pl.alasan.map(function(a){return '<li>'+esc(a)+'</li>'}).join("")+'</ul>'+
-  (pl.peringatan.length?'<h3 class="warn" style="margin-top:12px">Peringatan</h3><ul>'+pl.peringatan.map(function(a){return '<li>'+esc(a)+'</li>'}).join("")+'</ul>':'')+
+  (pw.length?'<h3 class="warn" style="margin-top:12px">Peringatan</h3><ul>'+pw.map(function(a){return '<li>'+esc(a)+'</li>'}).join("")+'</ul>':'')+
   '<p class="mu" style="margin-bottom:0">Rencana dari data bot (diperbarui '+ago(D.updated)+'), bukan jaminan. Cek spread dan berita sebelum order.</p></div>';
 }
 function viewA(){
-  var p=D.pairs[pair],pl=p.plans[style],lv=p.levels,d=p.dec,b=p.bias;
-  var h=pairChips()+teaser()+'<div class="card"><div class="row" style="justify-content:space-between"><span class="mu">'+pair+'</span><span class="pill '+cls(p.zone.name==="PREMIUM"?"turun":"naik")+'">'+p.zone.name+' '+f(p.zone.pct,0)+'%</span></div><div class="big num">'+f(p.price,d)+'</div>'+
+  if(!pair)return pairChips()+'<div class="card mu">Data saham belum tersedia. Mode ini diperbarui sekitar tiap 15 menit; coba lagi nanti.</div>';
+  var p=PS()[pair],pl=p.plans[style],lv=p.levels,d=p.dec,b=p.bias;
+  var h=pairChips()+teaser()+'<div class="card"><div class="row" style="justify-content:space-between"><span class="mu">'+pair+(p.label&&p.label!==pair?' - '+esc(p.label):'')+'</span><span class="pill '+cls(p.zone.name==="PREMIUM"?"turun":"naik")+'">'+p.zone.name+' '+f(p.zone.pct,0)+'%</span></div><div class="big num">'+(p.ccy==="IDR"?"Rp ":"")+f(p.price,d)+'</div>'+
   '<div class="row mu" style="margin:6px 0"><span>H1 <b class="'+cls(b.h1)+'">'+b.h1+(b.h1_event?' ('+b.h1_event+')':'')+'</b></span><span>M30 <b class="'+cls(b.m30)+'">'+b.m30+'</b></span><span>H4 <b class="'+cls(b.h4)+'">'+b.h4+'</b></span></div>'+chart(p,shown?pl:null)+
-  '<div class="mu">'+(lv.sw?lv.sw[0]+' '+f(lv.sw[1],d)+' | '+lv.sw[2]+' '+f(lv.sw[3],d)+'. ':'')+'EQH '+f(lv.eqh,d)+' | EQL '+f(lv.eql,d)+'. RVOL '+esc(p.rvol)+(p.session?' | sesi '+p.session:'')+'</div><div class="mu" style="margin-top:6px">Harga dari data bot, tertunda beberapa menit dan bisa beda dari harga broker.</div></div>'+
+  '<div class="mu">'+(lv.sw?lv.sw[0]+' '+f(lv.sw[1],d)+' | '+lv.sw[2]+' '+f(lv.sw[3],d)+'. ':'')+'EQH '+f(lv.eqh,d)+' | EQL '+f(lv.eql,d)+'. RVOL '+esc(p.rvol)+(p.session?' | sesi '+p.session:'')+'</div><div class="mu" style="margin-top:6px">'+(Date.now()-new Date(p.last)>2400000?'Harga terakhir tercatat '+wib(p.last)+' (pasar tutup atau data tertunda). ':'')+'Harga dari data bot, tertunda beberapa menit dan bisa beda dari harga broker.</div></div>'+
   '<div class="card"><h3>Gaya trading</h3><div class="row">'+["Scalp","Daytrade","Swing"].map(function(s){return '<button class="chip'+(s===style?' on':'')+'" data-s="'+s+'">'+s+'</button>'}).join("")+'</div><div class="mu" style="margin:8px 0 12px">'+HZ[style]+'</div>'+
   '<button class="go" id="go"'+(busy?' disabled':'')+'>'+(busy?'Menganalisis pasar...':'Buat rencana trading')+'</button></div>';
   if(shown&&!busy)h+=planCard(p,pl);
@@ -100,7 +115,8 @@ function viewA(){
   return h;
 }
 function viewT(){
-  var p=D.pairs[pair],d=p.dec,t=p.tech,h=pairChips()+'<div class="card"><h3>Ringkasan teknikal</h3>';
+  if(!pair)return pairChips()+'<div class="card mu">Data saham belum tersedia.</div>';
+  var p=PS()[pair],d=p.dec,t=p.tech,h=pairChips()+'<div class="card"><h3>Ringkasan teknikal</h3>';
   Object.keys(t).forEach(function(k){h+='<div class="row" style="justify-content:space-between;padding:4px 0"><span>'+k+'</span><span><b class="'+cls(t[k].all)+'">'+esc(t[k].all)+'</b> <span class="mu">MA '+esc(t[k].ma_l)+', indikator '+esc(t[k].ind_l)+'</span></span></div>'});
   var j=t["Per Jam"];h+='</div><div class="card"><h3>Moving average (Per Jam)</h3><div class="mu">Beli '+j.mc[0]+', jual '+j.mc[1]+'</div><div class="sc"><table><tr><th>MA</th><th>Sederhana</th><th>Eksponensial</th></tr>'+j.ma.map(function(r){return '<tr><td>'+r[0]+'</td><td class="num">'+f(r[1],d)+' <b class="'+cls(r[2])+'">'+(r[2]||"-")+'</b></td><td class="num">'+f(r[3],d)+' <b class="'+cls(r[4])+'">'+(r[4]||"-")+'</b></td></tr>'}).join("")+'</table></div></div>';
   h+='<div class="card"><h3>Indikator (Per Jam)</h3><div class="mu">Beli '+j.ic[0]+', jual '+j.ic[1]+', netral '+j.ic[2]+'</div><table>'+j.ind.map(function(r){return '<tr><td>'+esc(r[0])+'</td><td class="num">'+f(r[1],Math.abs(r[1])<100?3:d)+'</td><td><b class="'+cls(r[2])+'">'+esc(r[2])+'</b></td></tr>'}).join("")+'</table></div>';
@@ -164,12 +180,13 @@ document.addEventListener("click",function(e){
   else if(t.dataset.p){pair=t.dataset.p;shown=false;render()}
   else if(t.dataset.s){style=t.dataset.s;shown=false;render()}
   else if(t.dataset.f){nf=t.dataset.f;render()}
+  else if(t.dataset.m){mode=t.dataset.m;pair=null;shown=false;fixPair();render()}
+  else if(t.id==="cp"){copyPlan(t)}
   else if(t.id==="go"&&!busy){busy=true;render();setTimeout(function(){busy=false;shown=true;render()},700)}
 });
 document.addEventListener("input",function(e){
   if(e.target.id==="bl"||e.target.id==="rk"){
-    bal=$("bl").value;rk=$("rk").value;var pl=D.pairs[pair].plans[style],L=lot(pl);
-    $("lt").textContent="Lot "+L.lot.toFixed(2)+" | risiko sekitar $"+L.real.toFixed(2)+" dari target $"+L.want.toFixed(2);
+    var p=PS()[pair];balM[p.ccy]=$("bl").value;rk=$("rk").value;$("lt").textContent=lotText(lot(p.plans[style],p),p);
   }
 });
 load();setInterval(load,120000);
