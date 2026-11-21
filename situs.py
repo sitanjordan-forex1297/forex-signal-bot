@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import numpy as np
 import pandas as pd
 import bot
@@ -8,6 +9,14 @@ import riwayat
 
 OUT = "data.json"
 H4 = pd.Timedelta(hours=4)
+STOCKS = {
+    "BBCA": {"t": "BBCA.JK", "contract": 100, "dec": 0, "kind": "saham", "ccy": "IDR", "name": "Bank Central Asia"},
+    "BBRI": {"t": "BBRI.JK", "contract": 100, "dec": 0, "kind": "saham", "ccy": "IDR", "name": "Bank Rakyat Indonesia"},
+    "TLKM": {"t": "TLKM.JK", "contract": 100, "dec": 0, "kind": "saham", "ccy": "IDR", "name": "Telkom Indonesia"},
+    "NVDA": {"t": "NVDA", "contract": 1, "dec": 2, "kind": "saham", "ccy": "USD", "name": "Nvidia"},
+    "AAPL": {"t": "AAPL", "contract": 1, "dec": 2, "kind": "saham", "ccy": "USD", "name": "Apple"},
+    "TSLA": {"t": "TSLA", "contract": 1, "dec": 2, "kind": "saham", "ccy": "USD", "name": "Tesla"},
+}
 STYLES = {
     "Scalp": {"rule": "30min", "tf": bot.M30, "k": 2, "rr": (1.5, 3.0), "tap": 2, "hz": "30 menit sampai 3 jam"},
     "Daytrade": {"rule": "1h", "tf": bot.H1, "k": 3, "rr": (2.0, 4.0), "tap": 4, "hz": "3 sampai 24 jam"},
@@ -208,6 +217,8 @@ def pair_block(name, cfg, m5, news_txt):
     kz = bot.killzone(now)
     ch = [[c.o, c.h, c.l, c.c] for c in h1.iloc[-48:].itertuples()]
     return {"price": price, "dec": cfg["dec"], "contract": cfg["contract"], "chart": ch,
+            "kind": cfg.get("kind", "fx"), "ccy": cfg.get("ccy", "USD"), "label": cfg.get("name", name),
+            "last": (m5.index[-1] + bot.M5).isoformat(),
             "bias": {"h1": bot.arah(t1), "h1_event": ev1[-1][1] if ev1 else None,
                      "m30": bot.arah(t30), "h4": bot.arah(t4)},
             "zone": {"name": "PREMIUM" if pct > 50 else "DISCOUNT", "pct": pct},
@@ -292,6 +303,29 @@ def notify_plans(pairs, blk, now):
     return n
 
 
+def stocks_block(now, prev, manual):
+    """Analisis saham dihitung tiap 15 menit saja agar tidak membebani Yahoo."""
+    at = (prev or {}).get("stocks_at")
+    old = (prev or {}).get("stocks")
+    try:
+        if not manual and at and old and now - pd.Timestamp(at) < pd.Timedelta(minutes=14):
+            return old, at
+    except Exception:
+        pass
+    out = {}
+    for name, cfg in STOCKS.items():
+        try:
+            m5 = bot.load(cfg["t"])
+            if len(m5) >= 1500:
+                out[name] = pair_block(name, cfg, m5, "")
+        except Exception as e:
+            print("saham gagal:", name, type(e).__name__, str(e)[:100])
+        time.sleep(1)
+    if not out and old:
+        return old, at
+    return out, now.isoformat()
+
+
 def export(manual):
     now = pd.Timestamp.now(tz="UTC")
     prev = None
@@ -323,8 +357,9 @@ def export(manual):
     hist = state.get("hist", [])
     items = sorted(hist, key=lambda s: s["t0"], reverse=True)[:40]
     news, news_at = site_news(now, prev)
+    stocks, stocks_at = stocks_block(now, prev, manual)
     data = {"updated": now.isoformat(), "balance": bot.BALANCE, "risk_pct": bot.RISK_PCT,
-            "pairs": pairs, "news": news, "news_at": news_at, "block": blk["title"] if blk else None,
+            "pairs": pairs, "stocks": stocks, "stocks_at": stocks_at, "news": news, "news_at": news_at, "block": blk["title"] if blk else None,
             "history": {"stats": riwayat.stats(hist), "items": items}}
     with open(OUT, "w") as f:
         json.dump(clean(data), f, separators=(",", ":"))
