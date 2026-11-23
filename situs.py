@@ -17,11 +17,54 @@ STOCKS = {
     "AAPL": {"t": "AAPL", "contract": 1, "dec": 2, "kind": "saham", "ccy": "USD", "name": "Apple"},
     "TSLA": {"t": "TSLA", "contract": 1, "dec": 2, "kind": "saham", "ccy": "USD", "name": "Tesla"},
 }
+TFS_ALL = [("1 Mnt", "1min", pd.Timedelta(minutes=1), True), ("3 Mnt", "3min", pd.Timedelta(minutes=3), True),
+           ("5 Mnt", "5min", pd.Timedelta(minutes=5), False), ("15 Mnt", "15min", pd.Timedelta(minutes=15), False),
+           ("30 Mnt", "30min", pd.Timedelta(minutes=30), False), ("Per Jam", "1h", bot.H1, False),
+           ("4 Jam", "4h", H4, False)]
 STYLES = {
     "Scalp": {"rule": "30min", "tf": bot.M30, "k": 2, "rr": (1.5, 3.0), "tap": 2, "hz": "30 menit sampai 3 jam"},
     "Daytrade": {"rule": "1h", "tf": bot.H1, "k": 3, "rr": (2.0, 4.0), "tap": 4, "hz": "3 sampai 24 jam"},
     "Swing": {"rule": "4h", "tf": H4, "k": 3, "rr": (3.0, 5.0), "tap": 24, "hz": "2 sampai 7 hari"},
 }
+
+
+def load_1m(ticker):
+    """Data 1 menit (Yahoo hanya menyediakan beberapa hari terakhir) untuk timeframe 1 dan 3 menit."""
+    err = None
+    for _ in range(2):
+        try:
+            df = bot.yf.download(ticker, period="5d", interval="1m", progress=False, auto_adjust=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df = df[["Open", "High", "Low", "Close"]].dropna()
+            if df.empty:
+                raise ValueError("data kosong")
+            break
+        except Exception as e:
+            err = e
+            time.sleep(2)
+    else:
+        raise err
+    df.columns = ["o", "h", "l", "c"]
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
+    df.index = df.index.tz_convert("UTC")
+    return df[df.index + pd.Timedelta(minutes=1) <= pd.Timestamp.now(tz="UTC")]
+
+
+def tech_all(m5, m1):
+    out = {}
+    for lab, rule, dl, use1 in TFS_ALL:
+        src = m1 if use1 else m5
+        if src is None:
+            continue
+        end = src.index[-1] + (pd.Timedelta(minutes=1) if use1 else bot.M5)
+        df = bot.rs(src, rule)
+        df = df[df.index + dl <= end]
+        if len(df) < 60:
+            continue
+        out[lab] = teknikal.analyze_tf(df)
+    return out
 
 
 def clean(o):
@@ -172,7 +215,7 @@ def make_plan(name, cfg, m5, style, ctx):
             "loss_per_lot": risk * cfg["contract"], "alasan": why, "peringatan": warn}
 
 
-def pair_block(name, cfg, m5, news_txt):
+def pair_block(name, cfg, m5, news_txt, m1=None):
     now = pd.Timestamp.now(tz="UTC")
     end = m5.index[-1] + bot.M5
     h1 = bot.rs(m5, "1h")
@@ -197,12 +240,10 @@ def pair_block(name, cfg, m5, news_txt):
         seg = h1.iloc[te:]
         sw = (["Strong high", opp, "Weak low", seg.l.min()] if dr == -1
               else ["Strong low", opp, "Weak high", seg.h.max()])
-    res = {lab: teknikal.analyze_tf(teknikal.closed(m5, rule, dl)) for lab, rule, dl in teknikal.TFS}
-    tech = {}
-    for lab, r in res.items():
-        tech[lab] = {"all": r["all"], "ma_l": r["ma_l"], "ind_l": r["ind_l"], "mc": r["mc"], "ic": r["ic"]}
+    res = tech_all(m5, m1)
+    tech = {lab: {"all": r["all"], "ma_l": r["ma_l"], "ind_l": r["ind_l"], "mc": r["mc"], "ic": r["ic"],
+                  "ma": r["ma"], "ind": r["ind"], "piv": r["piv"]} for lab, r in res.items()}
     hr = res["Per Jam"]
-    tech["Per Jam"].update({"ma": hr["ma"], "ind": hr["ind"], "piv": hr["piv"]})
     ctx = {"tech_h1": hr["all"], "news": news_txt, "rvol": bot.rvol_label(bot.rvol(h1))}
     allp = bot.build_pois(h1, m5, a1, rl, rh)
     areas = []
@@ -350,8 +391,13 @@ def export(manual):
         m5 = riwayat.DATA.get(cfg["t"])
         if m5 is None or len(m5) < 1500:
             continue
+        m1 = None
         try:
-            pairs[name] = pair_block(name, cfg, m5, news_txt)
+            m1 = load_1m(cfg["t"])
+        except Exception as e:
+            print("data 1 menit gagal:", name, type(e).__name__, str(e)[:80])
+        try:
+            pairs[name] = pair_block(name, cfg, m5, news_txt, m1)
         except Exception as e:
             print("situs gagal:", name, type(e).__name__, str(e)[:120])
     hist = state.get("hist", [])
