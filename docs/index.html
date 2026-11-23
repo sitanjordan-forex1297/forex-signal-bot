@@ -42,7 +42,7 @@ ul{margin:6px 0 0;padding-left:18px}li{margin-bottom:4px}
 <main id="m"><div class="card mu">Memuat data...</div></main>
 <script>
 var URL="https://raw.githubusercontent.com/sitanjordan-forex1297/forex-signal-bot/main/data.json";
-var nf="Semua",mode="fx",balM={},D=null,tab="a",pair=null,style="Daytrade",shown=false,busy=false,bal=null,rk=null;
+var tfSel="Per Jam",nf="Semua",mode="fx",balM={},D=null,tab="a",pair=null,style="Daytrade",shown=false,busy=false,bal=null,rk=null;
 var HZ={Scalp:"Cepat, RR 1:1.5 dan 1:3",Daytrade:"Harian, RR 1:2 dan 1:4",Swing:"Tren, RR 1:3 dan 1:5"};
 function $(i){return document.getElementById(i)}
 function f(v,d){return v==null?"-":Number(v).toFixed(d)}
@@ -119,11 +119,14 @@ function viewT(){
   if(!pair)return pairChips()+'<div class="card mu">Data saham belum tersedia.</div>';
   var p=PS()[pair],d=p.dec,t=p.tech,h=pairChips()+'<div class="card"><h3>Ringkasan teknikal</h3>';
   Object.keys(t).forEach(function(k){h+='<div class="row" style="justify-content:space-between;padding:4px 0"><span>'+k+'</span><span><b class="'+cls(t[k].all)+'">'+esc(t[k].all)+'</b> <span class="mu">MA '+esc(t[k].ma_l)+', indikator '+esc(t[k].ind_l)+'</span></span></div>'});
-  var j=t["Per Jam"];h+='</div><div class="card"><h3>Moving average (Per Jam)</h3><div class="mu">Beli '+j.mc[0]+', jual '+j.mc[1]+'</div><div class="sc"><table><tr><th>MA</th><th>Sederhana</th><th>Eksponensial</th></tr>'+j.ma.map(function(r){return '<tr><td>'+r[0]+'</td><td class="num">'+f(r[1],d)+' <b class="'+cls(r[2])+'">'+(r[2]||"-")+'</b></td><td class="num">'+f(r[3],d)+' <b class="'+cls(r[4])+'">'+(r[4]||"-")+'</b></td></tr>'}).join("")+'</table></div></div>';
-  h+='<div class="card"><h3>Indikator (Per Jam)</h3><div class="mu">Beli '+j.ic[0]+', jual '+j.ic[1]+', netral '+j.ic[2]+'</div><table>'+j.ind.map(function(r){return '<tr><td>'+esc(r[0])+'</td><td class="num">'+f(r[1],Math.abs(r[1])<100?3:d)+'</td><td><b class="'+cls(r[2])+'">'+esc(r[2])+'</b></td></tr>'}).join("")+'</table></div>';
+  var tfs=Object.keys(t);if(!t[tfSel])tfSel=t["Per Jam"]?"Per Jam":tfs[0];
+  h+='</div><div class="card"><h3>Detail timeframe</h3><div class="row">'+tfs.map(function(k){return '<button class="chip'+(k===tfSel?' on':'')+'" data-tf="'+k+'">'+k+'</button>'}).join("")+'</div></div>';
+  var j=t[tfSel];if(!j.ma)return h+'<div class="card mu">Detail untuk timeframe ini belum tersedia.</div>';
+  h+='<div class="card"><h3>Moving average ('+tfSel+')</h3><div class="mu">Beli '+j.mc[0]+', jual '+j.mc[1]+'</div><div class="sc"><table><tr><th>MA</th><th>Sederhana</th><th>Eksponensial</th></tr>'+j.ma.map(function(r){return '<tr><td>'+r[0]+'</td><td class="num">'+f(r[1],d)+' <b class="'+cls(r[2])+'">'+(r[2]||"-")+'</b></td><td class="num">'+f(r[3],d)+' <b class="'+cls(r[4])+'">'+(r[4]||"-")+'</b></td></tr>'}).join("")+'</table></div></div>';
+  h+='<div class="card"><h3>Indikator ('+tfSel+')</h3><div class="mu">Beli '+j.ic[0]+', jual '+j.ic[1]+', netral '+j.ic[2]+'</div><table>'+j.ind.map(function(r){return '<tr><td>'+esc(r[0])+'</td><td class="num">'+f(r[1],Math.abs(r[1])<100?3:d)+'</td><td><b class="'+cls(r[2])+'">'+esc(r[2])+'</b></td></tr>'}).join("")+'</table></div>';
   var ks=Object.keys(j.piv),lb={Klasik:"Klasik",Fibonacci:"Fibo",Camarilla:"Camar.",Woodie:"Woodie",DeMark:"DeMark"},rw=["S3","S2","S1","P","R1","R2","R3"];
   var pv=function(v,i){return i<3?v[1][i]:i===3?v[0]:v[2][i-4]};
-  h+='<div class="card"><h3>Pivot points (candle Per Jam sebelumnya)</h3><div class="sc"><table class="pv"><tr><th></th>'+ks.map(function(k){return '<th>'+lb[k]+'</th>'}).join("")+'</tr>'+rw.map(function(r,i){return '<tr><td>'+r+'</td>'+ks.map(function(k){return '<td class="num">'+f(pv(j.piv[k],i),d)+'</td>'}).join("")+'</tr>'}).join("")+'</table></div></div>';
+  h+='<div class="card"><h3>Pivot points (candle '+tfSel+' sebelumnya)</h3><div class="sc"><table class="pv"><tr><th></th>'+ks.map(function(k){return '<th>'+lb[k]+'</th>'}).join("")+'</tr>'+rw.map(function(r,i){return '<tr><td>'+r+'</td>'+ks.map(function(k){return '<td class="num">'+f(pv(j.piv[k],i),d)+'</td>'}).join("")+'</tr>'}).join("")+'</table></div></div>';
   return h;
 }
 var KB=[
@@ -185,6 +188,7 @@ document.addEventListener("click",function(e){
   else if(t.dataset.p){pair=t.dataset.p;shown=false;render()}
   else if(t.dataset.s){style=t.dataset.s;shown=false;render()}
   else if(t.dataset.f){nf=t.dataset.f;render()}
+  else if(t.dataset.tf){tfSel=t.dataset.tf;render()}
   else if(t.dataset.m){mode=t.dataset.m;pair=null;shown=false;fixPair();render()}
   else if(t.id==="cp"){copyPlan(t)}
   else if(t.id==="go"&&!busy){busy=true;render();setTimeout(function(){busy=false;shown=true;render()},700)}
